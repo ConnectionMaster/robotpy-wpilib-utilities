@@ -1,6 +1,5 @@
 import wpilib
 import logging
-from typing import List, Tuple
 
 logger = logging.getLogger("simple_watchdog")
 
@@ -38,7 +37,7 @@ class SimpleWatchdog:
         self._expirationTime = 0  # us
         self._lastTimeoutPrintTime = 0  # us
         self._lastEpochsPrintTime = 0  # us
-        self._epochs: List[Tuple[str, int]] = []
+        self._epochs: list[tuple[str, int]] = []
 
     def getTime(self) -> float:
         """Returns the time in seconds since the watchdog was last fed."""
@@ -83,13 +82,15 @@ class SimpleWatchdog:
             now > self._expirationTime
             and now - self._lastEpochsPrintTime > self.kMinPrintPeriod
         ):
-            log = logger.info
             self._lastEpochsPrintTime = now
             prev = self._startTime
-            log("Watchdog not fed after %.6fs", (now - prev) / 1e6)
+            logger.warning("Watchdog not fed after %.6fs", (now - prev) / 1e6)
+            epoch_logs = []
             for key, value in self._epochs:
-                log("\t%s: %.6fs", key, (value - prev) / 1e6)
+                time = (value - prev) / 1e6
+                epoch_logs.append(f"\t{key}: {time:.6f}")
                 prev = value
+            logger.info("Epochs:\n%s", "\n".join(epoch_logs))
 
     def reset(self) -> None:
         """Resets the watchdog timer.

@@ -3,7 +3,7 @@ import inspect
 import logging
 from typing import Callable, Optional
 
-import networktables
+import ntcore
 import wpilib
 
 logger = logging.getLogger("autonomous")
@@ -39,7 +39,7 @@ class _State:
                 )
             if arg.kind is arg.KEYWORD_ONLY:
                 raise ValueError(
-                    "Cannot use keyword-only parameters for function %s" % name
+                    f"Cannot use keyword-only parameters for function {name}"
                 )
             if arg.name in allowed_args:
                 args.append(arg.name)
@@ -48,7 +48,7 @@ class _State:
 
         if invalid_args:
             raise ValueError(
-                "Invalid parameter names in %s: %s" % (name, ",".join(invalid_args))
+                "Invalid parameter names in {}: {}".format(name, ",".join(invalid_args))
             )
 
         functools.update_wrapper(self, f)
@@ -232,7 +232,8 @@ class StatefulAutonomous:
             for k, v in components.items():
                 setattr(self, k, v)
 
-        self.__table = networktables.NetworkTables.getTable("SmartDashboard")
+        NetworkTables = ntcore.NetworkTableInstance.getDefault()
+        self.__table = NetworkTables.getTable("SmartDashboard")
         self.__sd_args = []
 
         self.__build_states()
@@ -270,23 +271,22 @@ class StatefulAutonomous:
 
         # communicate the min/max value for numbers to the dashboard
         if is_number:
-            name = "%s|%0.3f|%0.3f" % (name, vmin, vmax)
+            name = f"{name}|{vmin:0.3f}|{vmax:0.3f}"
 
         self.__tunables.append(name)
         self.__table.putStringArray(self.MODE_NAME + "_tunables", self.__tunables)
 
     def __register_sd_var_internal(self, name, default, add_prefix, readback):
-
         if " " in name:
             raise ValueError(
-                "ERROR: Cannot use spaces in a tunable variable name (%s)" % name
+                f"ERROR: Cannot use spaces in a tunable variable name ({name})"
             )
 
         is_number = False
         sd_name = name
 
         if add_prefix:
-            sd_name = "%s\\%s" % (self.MODE_NAME, name)
+            sd_name = f"{self.MODE_NAME}\\{name}"
 
         if isinstance(default, bool):
             self.__table.putBoolean(sd_name, default)
@@ -309,7 +309,6 @@ class StatefulAutonomous:
         return is_number
 
     def __build_states(self):
-
         has_first = False
 
         states = {}

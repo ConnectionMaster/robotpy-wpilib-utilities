@@ -5,12 +5,12 @@ import sys
 import types
 import typing
 
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable
 
 import hal
 import wpilib
 
-from networktables import NetworkTables, NetworkTableEntry
+from ntcore import NetworkTableInstance
 
 # from wpilib.shuffleboard import Shuffleboard
 
@@ -67,29 +67,39 @@ class MagicRobot(wpilib.RobotBase):
 
     def __init__(self) -> None:
         super().__init__()
+        hal.report(
+            hal.tResourceType.kResourceType_Framework.value,
+            hal.tInstances.kFramework_MagicBot.value,
+        )
 
         self._exclude_from_injection = ["logger"]
 
-        self.__last_error_report = -10
+        self.__last_error_report = -10.0
 
-        self._components: List[Tuple[str, Any]] = []
-        self._feedbacks: List[Tuple[Callable[[], Any], NetworkTableEntry]] = []
-        self._reset_components: List[Tuple[Dict[str, Any], Any]] = []
+        self._components: list[tuple[str, Any]] = []
+        self._feedbacks: list[tuple[Callable[[], Any], Callable[[Any], Any]]] = []
+        self._reset_components: list[tuple[dict[str, Any], Any]] = []
 
         self.__done = False
 
-    def _simulationInit(self):
+        # cache these
+        self.__is_ds_attached = wpilib.DriverStation.isDSAttached
+        self.__sd_update = wpilib.SmartDashboard.updateValues
+        self.__lv_update = wpilib.LiveWindow.updateValues
+        # self.__sf_update = Shuffleboard.update
+
+    def _simulationInit(self) -> None:
         pass
 
-    def _simulationPeriodic(self):
+    def _simulationPeriodic(self) -> None:
         pass
 
-    def __simulationPeriodic(self):
+    def __simulationPeriodic(self) -> None:
         hal.simPeriodicBefore()
         self._simulationPeriodic()
         hal.simPeriodicAfter()
 
-    def robotInit(self):
+    def robotInit(self) -> None:
         """
         .. warning:: Internal API, don't override; use :meth:`createObjects` instead
         """
@@ -109,7 +119,7 @@ class MagicRobot(wpilib.RobotBase):
         self.__lv_update = wpilib.LiveWindow.updateValues
         # self.__sf_update = Shuffleboard.update
 
-        self.__nt = NetworkTables.getTable("/robot")
+        self.__nt = NetworkTableInstance.getDefault().getTable("/robot")
 
         self.__nt_put_is_ds_attached = self.__nt.getEntry("is_ds_attached").setBoolean
         self.__nt_put_mode = self.__nt.getEntry("mode").setString
@@ -119,7 +129,9 @@ class MagicRobot(wpilib.RobotBase):
 
         self.watchdog = SimpleWatchdog(self.control_loop_wait_time)
 
-        self.__periodics = [(self.robotPeriodic, "robotPeriodic()")]
+        self.__periodics: list[tuple[Callable[[], None], str]] = [
+            (self.robotPeriodic, "robotPeriodic()"),
+        ]
 
         if self.isSimulation():
             self._simulationInit()
@@ -369,6 +381,7 @@ class MagicRobot(wpilib.RobotBase):
 
     def endCompetition(self) -> None:
         self.__done = True
+        self._automodes.endCompetition()
 
     def autonomous(self) -> None:
         """
@@ -388,10 +401,7 @@ class MagicRobot(wpilib.RobotBase):
         except:
             self.onException(forceReport=True)
 
-        auto_functions: Tuple[Callable[[], None], ...] = (
-            self._execute_components,
-            self._update_feedback,
-        ) + tuple(p[0] for p in self.__periodics)
+        auto_functions: tuple[Callable[[], None], ...] = (self._enabled_periodic,)
 
         if self.use_teleop_in_autonomous:
             auto_functions = (self.teleopPeriodic,) + auto_functions
@@ -426,9 +436,17 @@ class MagicRobot(wpilib.RobotBase):
             self.onException(forceReport=True)
         watchdog.addEpoch("disabledInit()")
 
+        refreshData = wpilib.DriverStation.refreshData
+        DSControlWord = wpilib.DSControlWord
+
         with NotifierDelay(self.control_loop_wait_time) as delay:
-            while not self.__done and self.isDisabled():
-                if ds_attached != self.__is_ds_attached():
+            while not self.__done:
+                refreshData()
+                cw = DSControlWord()
+                if cw.isEnabled():
+                    break
+
+                if ds_attached != cw.isDSAttached():
                     ds_attached = not ds_attached
                     self.__nt_put_is_ds_attached(ds_attached)
 
@@ -439,12 +457,8 @@ class MagicRobot(wpilib.RobotBase):
                     self.onException()
                 watchdog.addEpoch("disabledPeriodic()")
 
-                self._update_feedback()
-                for periodic, name in self.__periodics:
-                    periodic()
-                    watchdog.addEpoch(name)
+                self._do_periodics()
                 # watchdog.disable()
-
                 watchdog.printIfExpired()
 
                 delay.wait()
@@ -476,9 +490,15 @@ class MagicRobot(wpilib.RobotBase):
         watchdog.addEpoch("teleopInit()")
 
         observe = hal.observeUserProgramTeleop
+        refreshData = wpilib.DriverStation.refreshData
+        isTeleopEnabled = wpilib.DriverStation.isTeleopEnabled
 
         with NotifierDelay(self.control_loop_wait_time) as delay:
-            while not self.__done and self.isOperatorControlEnabled():
+            while not self.__done:
+                refreshData()
+                if not isTeleopEnabled():
+                    break
+
                 observe()
                 try:
                     self.teleopPeriodic()
@@ -486,14 +506,8 @@ class MagicRobot(wpilib.RobotBase):
                     self.onException()
                 watchdog.addEpoch("teleopPeriodic()")
 
-                self._execute_components()
-
-                self._update_feedback()
-                for periodic, name in self.__periodics:
-                    periodic()
-                    watchdog.addEpoch(name)
+                self._enabled_periodic()
                 # watchdog.disable()
-
                 watchdog.printIfExpired()
 
                 delay.wait()
@@ -518,8 +532,16 @@ class MagicRobot(wpilib.RobotBase):
             self.onException(forceReport=True)
         watchdog.addEpoch("testInit()")
 
+        refreshData = wpilib.DriverStation.refreshData
+        DSControlWord = wpilib.DSControlWord
+
         with NotifierDelay(self.control_loop_wait_time) as delay:
-            while not self.__done and self.isTest() and self.isEnabled():
+            while not self.__done:
+                refreshData()
+                cw = DSControlWord()
+                if not (cw.isTest() and cw.isEnabled()):
+                    break
+
                 hal.observeUserProgramTest()
                 try:
                     self.testPeriodic()
@@ -527,12 +549,8 @@ class MagicRobot(wpilib.RobotBase):
                     self.onException()
                 watchdog.addEpoch("testPeriodic()")
 
-                self._update_feedback()
-                for periodic, name in self.__periodics:
-                    periodic()
-                    watchdog.addEpoch(name)
+                self._do_periodics()
                 # watchdog.disable()
-
                 watchdog.printIfExpired()
 
                 delay.wait()
@@ -541,7 +559,7 @@ class MagicRobot(wpilib.RobotBase):
         wpilib.LiveWindow.setEnabled(False)
         # Shuffleboard.disableActuatorWidgets()
 
-    def _on_mode_enable_components(self):
+    def _on_mode_enable_components(self) -> None:
         # initialize things
         for _, component in self._components:
             on_enable = getattr(component, "on_enable", None)
@@ -551,7 +569,7 @@ class MagicRobot(wpilib.RobotBase):
                 except:
                     self.onException(forceReport=True)
 
-    def _on_mode_disable_components(self):
+    def _on_mode_disable_components(self) -> None:
         # deinitialize things
         for _, component in self._components:
             on_disable = getattr(component, "on_disable", None)
@@ -561,8 +579,7 @@ class MagicRobot(wpilib.RobotBase):
                 except:
                     self.onException(forceReport=True)
 
-    def _create_components(self):
-
+    def _create_components(self) -> None:
         #
         # TODO: Will need to inject into any autonomous mode component
         #       too, as they're a bit different
@@ -580,7 +597,9 @@ class MagicRobot(wpilib.RobotBase):
 
         # - Iterate over class variables with type annotations
         # .. this hack is necessary for pybind11 based modules
-        sys.modules["pybind11_builtins"] = types.SimpleNamespace()
+        sys.modules["pybind11_builtins"] = types.SimpleNamespace()  # type: ignore
+
+        injectables = self._collect_injectables()
 
         for m, ctyp in typing.get_type_hints(cls).items():
             # Ignore private variables
@@ -594,28 +613,26 @@ class MagicRobot(wpilib.RobotBase):
             # If the type is not actually a type, give a meaningful error
             if not isinstance(ctyp, type):
                 raise TypeError(
-                    "%s has a non-type annotation on %s (%r); lone non-injection variable annotations are disallowed, did you want to assign a static variable?"
-                    % (cls.__name__, m, ctyp)
+                    f"{cls.__name__} has a non-type annotation on {m} ({ctyp!r}); lone non-injection variable annotations are disallowed, did you want to assign a static variable?"
                 )
 
-            component = self._create_component(m, ctyp)
+            component = self._create_component(m, ctyp, injectables)
 
             # Store for later
             components.append((m, component))
-
-        self._injectables = self._collect_injectables()
+            injectables[m] = component
 
         # For each new component, perform magic injection
         for cname, component in components:
             setup_tunables(component, cname, "components")
-            self._setup_vars(cname, component)
+            self._setup_vars(cname, component, injectables)
             self._setup_reset_vars(component)
 
         # Do it for autonomous modes too
         for mode in self._automodes.modes.values():
             mode.logger = logging.getLogger(mode.MODE_NAME)
             setup_tunables(mode, mode.MODE_NAME, "autonomous")
-            self._setup_vars(mode.MODE_NAME, mode)
+            self._setup_vars(mode.MODE_NAME, mode, injectables)
 
         # And for self too
         setup_tunables(self, "robot", None)
@@ -636,7 +653,7 @@ class MagicRobot(wpilib.RobotBase):
 
         self._components = components
 
-    def _collect_injectables(self) -> Dict[str, Any]:
+    def _collect_injectables(self) -> dict[str, Any]:
         injectables = {}
         cls = type(self)
 
@@ -659,16 +676,24 @@ class MagicRobot(wpilib.RobotBase):
 
         return injectables
 
-    def _create_component(self, name: str, ctyp: type):
+    def _create_component(self, name: str, ctyp: type, injectables: dict[str, Any]):
+        type_hints = typing.get_type_hints(ctyp.__init__)
+        NoneType = type(None)
+        init_return_type = type_hints.pop("return", NoneType)
+        assert (
+            init_return_type is NoneType
+        ), f"{ctyp!r} __init__ had an unexpected non-None return type hint"
+        requests = get_injection_requests(type_hints, name)
+        injections = find_injections(requests, injectables, name)
+
         # Create instance, set it on self
-        component = ctyp()
+        component = ctyp(**injections)
         setattr(self, name, component)
 
         # Ensure that mandatory methods are there
         if not callable(getattr(component, "execute", None)):
             raise ValueError(
-                "Component %s (%r) must have a method named 'execute'"
-                % (name, component)
+                f"Component {name} ({component!r}) must have a method named 'execute'"
             )
 
         # Automatically inject a logger object
@@ -678,12 +703,12 @@ class MagicRobot(wpilib.RobotBase):
 
         return component
 
-    def _setup_vars(self, cname: str, component) -> None:
+    def _setup_vars(self, cname: str, component, injectables: dict[str, Any]) -> None:
         self.logger.debug("Injecting magic variables into %s", cname)
 
         type_hints = typing.get_type_hints(type(component))
         requests = get_injection_requests(type_hints, cname, component)
-        injections = find_injections(requests, self._injectables, cname)
+        injections = find_injections(requests, injectables, cname)
         component.__dict__.update(injections)
 
     def _setup_reset_vars(self, component) -> None:
@@ -693,23 +718,36 @@ class MagicRobot(wpilib.RobotBase):
             component.__dict__.update(reset_dict)
             self._reset_components.append((reset_dict, component))
 
-    def _update_feedback(self) -> None:
-        for method, entry in self._feedbacks:
+    def _do_periodics(self) -> None:
+        """Run periodic methods which run in every mode."""
+        watchdog = self.watchdog
+
+        for method, setter in self._feedbacks:
             try:
                 value = method()
             except:
                 self.onException()
-                continue
-            entry.setValue(value)
-        self.watchdog.addEpoch("@magicbot.feedback")
+            else:
+                setter(value)
 
-    def _execute_components(self) -> None:
+        watchdog.addEpoch("@magicbot.feedback")
+
+        for periodic, name in self.__periodics:
+            periodic()
+            watchdog.addEpoch(name)
+
+    def _enabled_periodic(self) -> None:
+        """Run components and all periodic methods."""
+        watchdog = self.watchdog
+
         for name, component in self._components:
             try:
                 component.execute()
             except:
                 self.onException()
-            self.watchdog.addEpoch(name)
+            watchdog.addEpoch(name)
+
+        self._do_periodics()
 
         for reset_dict, component in self._reset_components:
             component.__dict__.update(reset_dict)

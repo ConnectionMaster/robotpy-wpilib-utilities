@@ -1,6 +1,6 @@
 import logging
 from pyfrc.test_support.controller import TestController as PyfrcTestController
-from networktables.util import ChooserControl
+from ntcore.util import ChooserControl
 
 
 autonomous_seconds = 15
@@ -19,7 +19,6 @@ def test_all_autonomous(control: PyfrcTestController):
     logger = logging.getLogger("test-all-autonomous")
 
     with control.run_robot():
-
         # Run disabled for a short period, chooser needs to be
         # initialized in robotInit
         control.step_timing(seconds=0.5, autonomous=True, enabled=False)
@@ -31,7 +30,6 @@ def test_all_autonomous(control: PyfrcTestController):
             return
 
         for choice in choices:
-
             chooser.setSelected(choice)
             logger.info(f"{'='*10} Testing '{choice}' {'='*10}")
 
@@ -45,5 +43,3 @@ def test_all_autonomous(control: PyfrcTestController):
 
             # Disabled for another short period
             control.step_timing(seconds=0.5, autonomous=True, enabled=False)
-
-        assert False
